@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// NipPik v2.1 — 3-dot menu + replies + extras
+// NipPik v2.1.1 — Блок 1 (баги + quick fixes)
 // ═══════════════════════════════════════════════════════════
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -74,7 +74,6 @@ const showScreen = id => {
   $$('.screen').forEach(s => s.classList.add('hidden'));
   $('#' + id).classList.remove('hidden');
 };
-
 function handleError(err, ctx = '') {
   console.error('❌ [' + ctx + ']', err);
   const code = err?.code || '';
@@ -104,6 +103,8 @@ const settings = {
     setChk('#settingSound', this.sound);
     setChk('#settingDataSaver', this.dataSaver);
     setChk('#settingHideLikes', this.hideLikes);
+    const gsb = $('#globalSoundBtn');
+    if (gsb) gsb.classList.toggle('muted', !this.sound);
   },
   set(key, value) {
     this[key] = value;
@@ -112,8 +113,11 @@ const settings = {
     this.apply();
   }
 };
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+  if (settings.theme === 'system') settings.apply();
+});
 
-// ═══ HISTORY / WATCH LATER / NOT INTERESTED / DRAFTS (localStorage) ═══
+// ═══ LOCAL STORAGE HELPERS ═══
 const history = {
   KEY: 'np_history', MAX: 100,
   getAll() { try { return JSON.parse(localStorage.getItem(this.KEY) || '[]'); } catch { return []; } },
@@ -125,7 +129,6 @@ const history = {
   },
   clear() { localStorage.removeItem(this.KEY); }
 };
-
 const notInterested = {
   KEY: 'np_notInterested',
   getAll() { try { return JSON.parse(localStorage.getItem(this.KEY) || '[]'); } catch { return []; } },
@@ -135,7 +138,6 @@ const notInterested = {
   },
   has(id) { return this.getAll().includes(id); }
 };
-
 const drafts = {
   KEY: 'np_drafts',
   getAll() { try { return JSON.parse(localStorage.getItem(this.KEY) || '[]'); } catch { return []; } },
@@ -192,8 +194,8 @@ const state = {
   pendingSound: null,
   unreadNotifs: 0, inboxFilter: 'all',
   searchFilter: 'all', searchTerm: '',
+  allNotifs: [],
 };
-
 const unsub = key => {
   if (state.subs.has(key)) { try { state.subs.get(key)(); } catch {} state.subs.delete(key); }
 };
@@ -317,17 +319,15 @@ async function createNotification(recipientId, type, data = {}) {
     });
   } catch (err) { console.warn('Notif:', err); }
 }
-
 function subscribeNotifications() {
   unsub('notifications');
   const q = query(collection(db, 'notifications'),
     where('recipientId', '==', state.user.uid), orderBy('createdAt', 'desc'), limit(50));
   const u = onSnapshot(q,
     snap => {
-      const all = snap.docs.map(d => ({ notifId: d.id, ...d.data() }));
-      state.allNotifs = all;
+      state.allNotifs = snap.docs.map(d => ({ notifId: d.id, ...d.data() }));
       renderInbox();
-      const unread = all.filter(n => !n.read).length;
+      const unread = state.allNotifs.filter(n => !n.read).length;
       state.unreadNotifs = unread;
       const badge = $('#inboxBadge');
       if (badge) {
@@ -337,14 +337,12 @@ function subscribeNotifications() {
     }, err => console.warn('Notif subscribe:', err));
   state.subs.set('notifications', u);
 }
-
 const notifLabels = {
   like: { text: 'лайкнул(а) видео', icon: '❤️', cls: 'like' },
   comment: { text: 'прокомментировал(а)', icon: '💬', cls: 'comment' },
   follow: { text: 'подписался(ась)', icon: '👤', cls: 'follow' },
   repost: { text: 'сделал(а) репост', icon: '🔁', cls: 'repost' },
 };
-
 function renderInbox() {
   const el = $('#inboxList');
   if (!el) return;
@@ -371,7 +369,6 @@ function renderInbox() {
       <div class="notif-icon ${label.cls}">${label.icon}</div>
     </div>`;
   }).join('');
-
   el.querySelectorAll('.notif-item').forEach(item =>
     item.addEventListener('click', async () => {
       const nid = item.dataset.nid, vid = item.dataset.vid, type = item.dataset.type;
@@ -389,8 +386,7 @@ function renderInbox() {
 // ═══ ONBOARDING ═══
 let avatarFile = null;
 $('#avatarInput').addEventListener('change', e => {
-  const f = e.target.files?.[0];
-  if (!f) return;
+  const f = e.target.files?.[0]; if (!f) return;
   avatarFile = f;
   $('#avatarPreview').innerHTML = `<img src="${URL.createObjectURL(f)}" />`;
 });
@@ -512,7 +508,70 @@ $('#actionSheet').addEventListener('click', e => {
   if (e.target.id === 'actionSheet') $('#actionSheet').classList.add('hidden');
 });
 
-// ═══ INIT MAIN APP ═══
+// ═══ MINI PROFILE ═══
+async function openMiniProfile(uid) {
+  if (uid === state.user.uid) {
+    state.viewingProfileUid = null;
+    switchTab('profile');
+    return;
+  }
+  const p = await getUserProfile(uid);
+  if (!p) return toast('Профиль не найден');
+  const followId = `${state.user.uid}_${uid}`;
+  const followSnap = await getDoc(doc(db, 'follows', followId));
+  const isFollowing = followSnap.exists();
+
+  const modal = document.createElement('div');
+  modal.className = 'overlay';
+  modal.innerHTML = `
+    <div class="mini-profile-sheet">
+      <div class="mp-avatar">${p.avatar ? `<img src="${p.avatar}" />` : '👤'}</div>
+      <div class="mp-name">${escapeHtml(p.displayName || p.username)}</div>
+      <div class="mp-username">@${escapeHtml(p.username)}</div>
+      <div class="mp-stats">
+        <div><b>${fmtNum(p.followingCount)}</b><small>Подписки</small></div>
+        <div><b>${fmtNum(p.followersCount)}</b><small>Подписчики</small></div>
+        <div><b>${fmtNum(p.likesCount)}</b><small>Лайки</small></div>
+      </div>
+      ${p.bio ? `<p class="mp-bio">${escapeHtml(p.bio)}</p>` : ''}
+      <div class="mp-actions">
+        <button class="btn-${isFollowing ? 'secondary' : 'primary'}" id="mpFollowBtn">
+          ${isFollowing ? 'Отписаться' : 'Подписаться'}
+        </button>
+        <button class="btn-secondary" id="mpOpenBtn">Открыть профиль</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#mpFollowBtn').addEventListener('click', async () => {
+    const btn = modal.querySelector('#mpFollowBtn');
+    try {
+      if (isFollowing) {
+        await deleteDoc(doc(db, 'follows', followId));
+        try { await updateDoc(doc(db, 'users', uid), { followersCount: increment(-1) }); } catch {}
+        try { await updateDoc(doc(db, 'users', state.user.uid), { followingCount: increment(-1) }); } catch {}
+        btn.textContent = 'Подписаться';
+        btn.className = 'btn-primary';
+      } else {
+        await setDoc(doc(db, 'follows', followId), { followerId: state.user.uid, followingId: uid, createdAt: serverTimestamp() });
+        try { await updateDoc(doc(db, 'users', uid), { followersCount: increment(1) }); } catch {}
+        try { await updateDoc(doc(db, 'users', state.user.uid), { followingCount: increment(1) }); } catch {}
+        createNotification(uid, 'follow', {});
+        btn.textContent = 'Отписаться';
+        btn.className = 'btn-secondary';
+      }
+      modal.remove();
+    } catch (err) { handleError(err, 'mini.follow'); }
+  });
+  modal.querySelector('#mpOpenBtn').addEventListener('click', () => {
+    modal.remove();
+    state.viewingProfileUid = uid;
+    switchTab('profile');
+  });
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+// ═══ INIT ═══
 function initMainApp() {
   if (state.inited) return;
   state.inited = true;
@@ -526,7 +585,17 @@ function initMainApp() {
   $('#tabForYou').addEventListener('click', () => setFeedMode('foryou'));
   $('#tabFollowing').addEventListener('click', () => setFeedMode('following'));
 
-  // Search
+  const globalSoundBtn = $('#globalSoundBtn');
+  if (globalSoundBtn) {
+    globalSoundBtn.classList.toggle('muted', !settings.sound);
+    globalSoundBtn.addEventListener('click', () => {
+      settings.set('sound', !settings.sound);
+      globalSoundBtn.classList.toggle('muted', !settings.sound);
+      $$('.video-card video').forEach(v => { v.muted = !settings.sound; });
+      $$('.video-card .sound-line').forEach(l => { l.style.display = !settings.sound ? 'block' : 'none'; });
+    });
+  }
+
   let searchTimer;
   $('#searchInput').addEventListener('input', e => {
     clearTimeout(searchTimer);
@@ -545,22 +614,19 @@ function initMainApp() {
     $('#trendingTitle').classList.remove('hidden');
     $('#searchResults').innerHTML = '';
   });
-  $$('.sft-btn').forEach(b =>
-    b.addEventListener('click', () => {
-      $$('.sft-btn').forEach(x => x.classList.remove('active'));
-      b.classList.add('active');
-      state.searchFilter = b.dataset.sft;
-      if (state.searchTerm) doSearch(state.searchTerm);
-    }));
+  $$('.sft-btn').forEach(b => b.addEventListener('click', () => {
+    $$('.sft-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    state.searchFilter = b.dataset.sft;
+    if (state.searchTerm) doSearch(state.searchTerm);
+  }));
 
-  // Upload
   $('#videoInput').addEventListener('change', onVideoPicked);
   $('#uploadSubmitBtn').addEventListener('click', submitUpload);
   $('#uploadCancelBtn').addEventListener('click', resetUpload);
   $('#saveDraftBtn').addEventListener('click', saveDraft);
   renderDrafts();
 
-  // Profile & settings
   $('#profileLogoutBtn').addEventListener('click', () => signOut(auth));
   $('#profileBackBtn').addEventListener('click', () => { state.viewingProfileUid = null; switchTab('profile'); });
   $('#profileSettingsBtn').addEventListener('click', () => switchTab('settings'));
@@ -571,21 +637,18 @@ function initMainApp() {
   $('#clearHistoryBtn').addEventListener('click', clearHistory);
   $('#clearHistoryBtn2').addEventListener('click', clearHistory);
   $('#inboxReadAllBtn').addEventListener('click', readAllNotifs);
-  $$('.if-btn').forEach(b =>
-    b.addEventListener('click', () => {
-      $$('.if-btn').forEach(x => x.classList.remove('active'));
-      b.classList.add('active');
-      state.inboxFilter = b.dataset.if;
-      renderInbox();
-    }));
-
+  $$('.if-btn').forEach(b => b.addEventListener('click', () => {
+    $$('.if-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    state.inboxFilter = b.dataset.if;
+    renderInbox();
+  }));
   $$('.profile-tab').forEach(tab => tab.addEventListener('click', () => {
     $$('.profile-tab').forEach(t => t.classList.remove('active'));
     tab.classList.add('active');
     loadProfileGrid(tab.dataset.ptab);
   }));
 
-  // Comments
   $('#commentsCloseBtn').addEventListener('click', closeComments);
   $('#commentsOverlay').addEventListener('click', e => { if (e.target.id === 'commentsOverlay') closeComments(); });
   $('#commentSendBtn').addEventListener('click', sendComment);
@@ -593,13 +656,11 @@ function initMainApp() {
   $('#cancelReplyBtn').addEventListener('click', cancelReply);
   $('#emojiToggleBtn').addEventListener('click', toggleEmojiBar);
 
-  // Feed infinite
   $('#feedContainer').addEventListener('scroll', e => {
     const el = e.target;
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) loadMoreFeed();
   });
 
-  // Settings
   $$('.theme-card').forEach(b => b.addEventListener('click', () => settings.set('theme', b.dataset.themeVal)));
   $('#settingAutoplay').addEventListener('change', e => settings.set('autoplay', e.target.checked));
   $('#settingSound').addEventListener('change', e => settings.set('sound', e.target.checked));
@@ -618,9 +679,7 @@ function initMainApp() {
   $('#exportSettingsBtn').addEventListener('click', exportSettings);
   $('#settingsCloudInfo').textContent = `${CLOUDINARY.cloudName} · ${CLOUDINARY.uploadPreset}`;
 
-  // PWA
   initPwa();
-
   settings.apply();
   setFeedMode('foryou');
   refreshTrending();
@@ -639,6 +698,7 @@ function switchTab(tab) {
   if (tab === 'settings') settings.apply();
   if (tab === 'history') renderHistory();
 }
+
 // ═══ FEED ═══
 function setFeedMode(mode) {
   state.feedMode = mode;
@@ -657,6 +717,10 @@ function feedScore(video) {
   return recency + getVideoBoost(video) * 30;
 }
 function subscribeFeed() {
+  const container = $('#feedContainer');
+  if (container && state.renderedCards.size === 0) {
+    container.innerHTML = `<div class="skeleton-feed"><div class="skeleton-video"></div></div>`;
+  }
   if (state.feedMode === 'foryou') {
     const q = query(collection(db, 'videos'), orderBy('createdAt', 'desc'), limit(50));
     const u = onSnapshot(q,
@@ -732,7 +796,7 @@ function diffFeed(videos) {
     container.innerHTML = emptyFeedHTML('Пока нет видео');
     state.renderedCards.clear(); return;
   }
-  if (container.querySelector('.empty-state')) container.innerHTML = '';
+  if (container.querySelector('.empty-state') || container.querySelector('.skeleton-feed')) container.innerHTML = '';
   const newIds = new Set(videos.map(v => v.videoId));
   for (const [id, card] of state.renderedCards) {
     if (!newIds.has(id)) { card.remove(); state.renderedCards.delete(id); }
@@ -766,14 +830,23 @@ function renderVideoCard(video) {
   const card = document.createElement('div');
   card.className = 'video-card';
   card.dataset.videoId = video.videoId;
-  const a = video.author || { username: 'user', avatar: '' };
-  const isOwn = state.user.uid === video.authorId;
-  const boost = getVideoBoost(video);
+
   const isRepost = video.repostOf && video.originalAuthorUsername;
+  const a = isRepost
+    ? {
+        username: video.originalAuthorUsername,
+        avatar: video.originalAuthorAvatar || '',
+        uid: video.originalAuthorId,
+      }
+    : (video.author || { username: 'user', avatar: '', uid: video.authorId });
+  const isOwn = !isRepost && state.user.uid === video.authorId;
+  const isMyRepost = isRepost && state.user.uid === video.authorId;
+  const boost = getVideoBoost(video);
 
   card.innerHTML = `
     <video src="${video.videoUrl}" ${video.thumbnailUrl ? `poster="${video.thumbnailUrl}"` : ''}
       loop ${settings.sound ? '' : 'muted'} playsinline preload="metadata"></video>
+    <div class="video-progress"><div class="video-progress-bar"></div></div>
     ${isRepost ? `<div class="repost-badge">🔁 Репост от @${escapeHtml(video.originalAuthorUsername)}</div>` : ''}
     ${boost > 0 && !isRepost ? `<div class="boost-badge">🔥 +${boost}</div>` : ''}
     <div class="video-overlay-top-right">
@@ -782,9 +855,9 @@ function renderVideoCard(video) {
       </button>
     </div>
     <div class="action-rail">
-      <button class="author-avatar-btn" data-act="profile">
+      <button class="author-avatar-btn" data-act="avatar">
         ${a.avatar ? `<img src="${a.avatar}" />` : `<div class="avatar-placeholder">👤</div>`}
-        ${!isOwn ? `<span class="follow-badge" data-act="follow">+</span>` : ''}
+        ${!isOwn && !isMyRepost ? `<span class="follow-badge" data-act="follow">+</span>` : ''}
       </button>
       <button class="action-btn" data-act="like">
         <svg class="heart-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
@@ -802,6 +875,7 @@ function renderVideoCard(video) {
       </button>
     </div>
     <div class="video-info">
+      ${isMyRepost ? `<p style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:4px;">🔁 Репост от тебя</p>` : ''}
       <button class="video-author" data-act="profile">@${escapeHtml(a.username)}</button>
       <p class="video-caption">${renderText(video.caption || '')}</p>
       ${video.hashtags?.length ? `<p class="video-hashtags">${video.hashtags.slice(0,5).map(h => `<span class="tag-link" data-hashtag="#${h}">#${escapeHtml(h)}</span>`).join(' ')}</p>` : ''}
@@ -815,6 +889,11 @@ function renderVideoCard(video) {
   const vid = card.querySelector('video');
   vid.muted = !settings.sound;
   card.querySelectorAll('.sound-line').forEach(l => l.style.display = vid.muted ? '' : 'none');
+
+  const progressBar = card.querySelector('.video-progress-bar');
+  vid.addEventListener('timeupdate', () => {
+    if (vid.duration) progressBar.style.width = (vid.currentTime / vid.duration * 100) + '%';
+  });
 
   const io = new IntersectionObserver(([entry]) => {
     if (entry.isIntersecting) {
@@ -831,7 +910,6 @@ function renderVideoCard(video) {
   }, { threshold: 0.6 });
   io.observe(card);
 
-  // Tap/double-tap
   let tapTimer = null, lastTap = 0;
   vid.addEventListener('click', e => {
     if (e.target.closest('button')) return;
@@ -849,7 +927,6 @@ function renderVideoCard(video) {
     lastTap = now;
   });
 
-  // Click tags/mentions
   card.querySelectorAll('[data-hashtag]').forEach(t =>
     t.addEventListener('click', e => {
       e.stopPropagation();
@@ -866,27 +943,34 @@ function renderVideoCard(video) {
       if (!snap.empty) { state.viewingProfileUid = snap.docs[0].id; switchTab('profile'); }
     }));
 
-  // Actions
   card.querySelectorAll('[data-act]').forEach(btn =>
     btn.addEventListener('click', e => {
       e.stopPropagation();
       const act = btn.dataset.act;
+      if (act === 'avatar') {
+        const authorUid = isRepost ? video.originalAuthorId : video.authorId;
+        openMiniProfile(authorUid);
+        return;
+      }
       if (act === 'mute') { vid.muted = !vid.muted; card.querySelectorAll('.sound-line').forEach(l => l.style.display = vid.muted ? '' : 'none'); }
       if (act === 'like') doLike(video, card);
       if (act === 'comments') openComments(video);
       if (act === 'save') doSave(video, card);
       if (act === 'more') openVideoMoreMenu(video, card);
-      if (act === 'profile') { state.viewingProfileUid = video.authorId; switchTab('profile'); }
-      if (act === 'follow') doFollow(video.authorId, btn);
+      if (act === 'profile') { 
+        state.viewingProfileUid = isRepost ? video.originalAuthorId : video.authorId; 
+        switchTab('profile'); 
+      }
+      if (act === 'follow') doFollow(isRepost ? video.originalAuthorId : video.authorId, btn);
     }));
 
-  // Init liked/saved/followed
   (async () => {
     try {
+      const followTarget = isRepost ? video.originalAuthorId : video.authorId;
       const [l, s, f] = await Promise.all([
         getDoc(doc(db, 'likes', `${state.user.uid}_${video.videoId}`)),
         getDoc(doc(db, 'saves', `${state.user.uid}_${video.videoId}`)),
-        isOwn ? Promise.resolve(null) : getDoc(doc(db, 'follows', `${state.user.uid}_${video.authorId}`))
+        (isOwn || isMyRepost) ? Promise.resolve(null) : getDoc(doc(db, 'follows', `${state.user.uid}_${followTarget}`))
       ]);
       if (l.exists()) card.querySelector('.heart-icon').classList.add('liked');
       if (s.exists()) card.querySelector('.bookmark-icon').classList.add('saved');
@@ -898,50 +982,52 @@ function renderVideoCard(video) {
   return card;
 }
 
-// ═══ MORE MENU (3 dots) ═══
+// ═══ MORE MENU ═══
 function openVideoMoreMenu(video, card) {
   const isOwn = video.authorId === state.user.uid;
   const items = [
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>',
-      label: 'Репост', action: () => doRepost(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>',
-      label: 'Поделиться', action: () => shareVideo(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
-      label: 'Скачать', action: () => downloadVideo(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
-      label: 'Использовать звук', action: () => useSound(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="10"/></svg>',
-      label: 'Смотреть позже', action: () => addWatchLater(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
-      label: 'В коллекцию', action: () => addToCollection(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
-      label: 'Пожаловаться', action: () => openReport(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>', label: 'Репост', action: () => doRepost(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>', label: 'Поделиться', action: () => shareVideo(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>', label: 'Скачать', action: () => downloadVideo(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>', label: 'Использовать звук', action: () => useSound(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="10"/></svg>', label: 'Смотреть позже', action: () => addWatchLater(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>', label: 'В коллекцию', action: () => addToCollection(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>', label: 'Пожаловаться', action: () => openReport(video) },
   ];
   if (!isOwn) items.push({
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
     label: 'Не интересно', action: () => markNotInterested(video, card)
   });
-  if (isOwn) items.push(
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
-      label: 'Редактировать', action: () => editVideo(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg>',
-      label: 'Закрепить в профиле', action: () => pinVideo(video) },
-    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>',
-      label: 'Удалить', danger: true, action: () => doDeleteVideo(video) }
+  if (isOwn && !video.repostOf) items.push(
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>', label: 'Редактировать', action: () => editVideo(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg>', label: 'Закрепить', action: () => pinVideo(video) },
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>', label: 'Удалить', danger: true, action: () => doDeleteVideo(video) }
+  );
+  if (isOwn && video.repostOf) items.push(
+    { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>', label: 'Удалить репост', danger: true, action: () => doDeleteVideo(video) }
   );
   openActionSheet(items);
 }
 
-// ═══ VIDEO ACTIONS ═══
+// ═══ ACTIONS ═══
 async function doDeleteVideo(video) {
   if (video.authorId !== state.user.uid) return;
-  if (!confirm('Удалить это видео?')) return;
-  try { await deleteDoc(doc(db, 'videos', video.videoId)); toast('Видео удалено'); refreshTrending(); }
+  if (!confirm('Удалить?')) return;
+  try { await deleteDoc(doc(db, 'videos', video.videoId)); toast('Удалено'); refreshTrending(); }
   catch (err) { handleError(err, 'delete'); }
 }
+
 async function doRepost(video) {
-  if (video.authorId === state.user.uid) return toast('Нельзя репостить своё');
-  if (!confirm(`Репост @${video.author?.username || 'user'}?`)) return;
+  if (video.authorId === state.user.uid && !video.repostOf) return toast('Нельзя репостить своё');
+  const originalId = video.repostOf || video.videoId;
+  try {
+    const q = query(collection(db, 'videos'),
+      where('authorId', '==', state.user.uid),
+      where('repostOf', '==', originalId), limit(1));
+    const snap = await getDocs(q);
+    if (!snap.empty) return toast('Ты уже репостил это видео');
+  } catch (err) { console.warn('Repost check:', err); }
+  if (!confirm(`Репост @${video.author?.username || video.originalAuthorUsername || 'user'}?`)) return;
   try {
     await addDoc(collection(db, 'videos'), {
       authorId: state.user.uid,
@@ -950,16 +1036,18 @@ async function doRepost(video) {
       caption: video.caption || '',
       hashtags: video.hashtags || [],
       music: video.music || 'original sound',
-      repostOf: video.videoId,
-      originalAuthorId: video.authorId,
-      originalAuthorUsername: video.author?.username || '',
+      repostOf: originalId,
+      originalAuthorId: video.originalAuthorId || video.authorId,
+      originalAuthorUsername: video.originalAuthorUsername || video.author?.username || '',
+      originalAuthorAvatar: video.originalAuthorAvatar || video.author?.avatar || '',
       likesCount: 0, commentsCount: 0, sharesCount: 0, viewsCount: 0,
       createdAt: serverTimestamp(),
     });
-    createNotification(video.authorId, 'repost', { videoId: video.videoId });
+    createNotification(video.originalAuthorId || video.authorId, 'repost', { videoId: originalId });
     toast('Репост опубликован ✔');
   } catch (err) { handleError(err, 'repost'); }
 }
+
 async function downloadVideo(video) {
   try {
     const res = await fetch(video.videoUrl, { mode: 'cors' });
@@ -976,6 +1064,7 @@ async function downloadVideo(video) {
     toast('Открыто в новой вкладке');
   }
 }
+
 function useSound(video) {
   state.pendingSound = {
     music: video.music || 'original sound',
@@ -999,6 +1088,7 @@ function useSound(video) {
   });
   toast('Звук выбран');
 }
+
 async function addWatchLater(video) {
   try {
     await setDoc(doc(db, 'saves', `${state.user.uid}_wl_${video.videoId}`),
@@ -1006,11 +1096,11 @@ async function addWatchLater(video) {
     toast('Добавлено в «Смотреть позже»');
   } catch (err) { handleError(err, 'wl'); }
 }
+
 async function addToCollection(video) {
   const collections = ['Избранное', 'Красивое', 'Смешное', 'Музыка', 'Для обучения'];
   const items = collections.map(c => ({
-    icon: '📁',
-    label: c,
+    icon: '📁', label: c,
     action: async () => {
       try {
         await setDoc(doc(db, 'saves', `${state.user.uid}_${c}_${video.videoId}`),
@@ -1021,12 +1111,14 @@ async function addToCollection(video) {
   }));
   openActionSheet(items);
 }
+
 function markNotInterested(video, card) {
   notInterested.add(video.videoId);
   card.remove();
   state.renderedCards.delete(video.videoId);
   toast('Не покажем больше');
 }
+
 async function editVideo(video) {
   const modal = document.createElement('div');
   modal.className = 'overlay';
@@ -1052,12 +1144,14 @@ async function editVideo(video) {
     } catch (err) { toast(err.message); }
   });
 }
+
 async function pinVideo(video) {
   try {
     await updateDoc(doc(db, 'users', state.user.uid), { pinnedVideoId: video.videoId });
-    toast('Закреплено в профиле');
+    toast('Закреплено');
   } catch (err) { toast(err.message); }
 }
+
 async function shareVideo(video) {
   const url = `${location.origin}/?v=${video.videoId}`;
   const items = [
@@ -1075,6 +1169,7 @@ async function shareVideo(video) {
   });
   openActionSheet(items);
 }
+
 function openReport(video) {
   const reasons = ['Спам', 'Насилие', 'Порнография', 'Наркотики', 'Оскорбления', 'Другое'];
   const items = reasons.map(r => ({
@@ -1091,6 +1186,7 @@ function openReport(video) {
   }));
   openActionSheet(items);
 }
+
 async function openQrProfile(uid) {
   const p = await getUserProfile(uid);
   if (!p) return;
@@ -1116,7 +1212,7 @@ async function openQrProfile(uid) {
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
 }
 
-// ═══ LIKE / SAVE / FOLLOW ═══
+// ═══ LIKE/SAVE/FOLLOW ═══
 function showBigHeart(card) {
   const el = document.createElement('div');
   el.className = 'big-heart';
@@ -1134,7 +1230,8 @@ function showPlayIndicator(card) {
 function removePlayIndicator(card) { card.querySelector('.play-indicator')?.remove(); }
 
 async function doLike(video, card, force = false) {
-  if (video.authorId === state.user.uid) return toast('Своё нельзя лайкнуть');
+  const isOwnOriginal = video.authorId === state.user.uid && !video.repostOf;
+  if (isOwnOriginal) return toast('Своё нельзя лайкнуть');
   const heart = card.querySelector('.heart-icon');
   const countEl = card.querySelector('[data-count="likes"]');
   const ref = doc(db, 'likes', `${state.user.uid}_${video.videoId}`);
@@ -1145,21 +1242,26 @@ async function doLike(video, card, force = false) {
     countEl.textContent = fmtNum((video.likesCount || 0) + 1);
     try { await setDoc(ref, { userId: state.user.uid, videoId: video.videoId, createdAt: serverTimestamp() }); }
     catch (err) { heart.classList.remove('liked'); countEl.textContent = fmtNum(video.likesCount || 0); return handleError(err, 'like'); }
+    const notifyAuthor = video.repostOf ? video.originalAuthorId : video.authorId;
     try { await updateDoc(doc(db, 'videos', video.videoId), { likesCount: increment(1) }); } catch {}
-    try { await updateDoc(doc(db, 'users', video.authorId), { likesCount: increment(1) }); } catch {}
-    createNotification(video.authorId, 'like', { videoId: video.videoId });
+    try { await updateDoc(doc(db, 'users', notifyAuthor), { likesCount: increment(1) }); } catch {}
+    createNotification(notifyAuthor, 'like', { videoId: video.repostOf || video.videoId });
     video.likesCount = (video.likesCount || 0) + 1;
   } else if (!force) {
     heart.classList.remove('liked');
     countEl.textContent = fmtNum(Math.max(0, (video.likesCount || 1) - 1));
     try { await deleteDoc(ref); }
     catch (err) { heart.classList.add('liked'); countEl.textContent = fmtNum(video.likesCount || 0); return handleError(err, 'unlike'); }
+    const notifyAuthor = video.repostOf ? video.originalAuthorId : video.authorId;
     try { await updateDoc(doc(db, 'videos', video.videoId), { likesCount: increment(-1) }); } catch {}
-    try { await updateDoc(doc(db, 'users', video.authorId), { likesCount: increment(-1) }); } catch {}
+    try { await updateDoc(doc(db, 'users', notifyAuthor), { likesCount: increment(-1) }); } catch {}
     video.likesCount = Math.max(0, (video.likesCount || 1) - 1);
   }
 }
+
 async function doSave(video, card) {
+  const isOwnOriginal = video.authorId === state.user.uid && !video.repostOf;
+  if (isOwnOriginal) return toast('Своё нельзя сохранить');
   const icon = card.querySelector('.bookmark-icon');
   const ref = doc(db, 'saves', `${state.user.uid}_${video.videoId}`);
   let existed = false;
@@ -1173,6 +1275,7 @@ async function doSave(video, card) {
     try { await deleteDoc(ref); } catch (err) { icon.classList.add('saved'); handleError(err, 'unsave'); }
   }
 }
+
 async function doFollow(authorId, badgeEl) {
   if (authorId === state.user.uid) return toast('Себя подписать нельзя');
   const ref = doc(db, 'follows', `${state.user.uid}_${authorId}`);
@@ -1194,15 +1297,12 @@ async function doFollow(authorId, badgeEl) {
   }
 }
 
-// ═══ COMMENTS + REPLIES + EMOJI ═══
+// ═══ COMMENTS ═══
 const EMOJI_LIST = ['❤️','🔥','😂','😍','😮','😢','👍','👏','💯','🎉','✨','💪','🙌','😎','🤔','🥰','😭','🤣','👀','💀','🎵','🎬','🌟','⚡','🍕','🐱','🐶','🌈','☀️','🌙'];
-
 function toggleEmojiBar() {
   const bar = $('#emojiBar');
   if (!bar.innerHTML) {
-    bar.innerHTML = EMOJI_LIST.map(e =>
-      `<button class="emoji-btn" data-emoji="${e}">${e}</button>`
-    ).join('');
+    bar.innerHTML = EMOJI_LIST.map(e => `<button class="emoji-btn" data-emoji="${e}">${e}</button>`).join('');
     bar.querySelectorAll('.emoji-btn').forEach(b =>
       b.addEventListener('click', () => {
         const input = $('#commentInput');
@@ -1261,12 +1361,11 @@ function openComments(video) {
       };
       listEl.innerHTML = rootComments.map(c => {
         const replies = repliesByParent[c.commentId] || [];
-        return `<div class="comment-item has-replies" data-parent="${c.commentId}">
+        return `<div class="comment-item has-replies">
           ${renderComment(c, false)}
           ${replies.length ? `<div class="comment-replies">${replies.map(r => renderComment(r, true)).join('')}</div>` : ''}
         </div>`;
       }).join('');
-      // Handlers
       listEl.querySelectorAll('.comment-like').forEach(b =>
         b.addEventListener('click', () => likeComment(b.dataset.cid, b)));
       listEl.querySelectorAll('.comment-reply-btn').forEach(b =>
@@ -1324,6 +1423,8 @@ async function sendComment() {
   const input = $('#commentInput');
   const text = input.value.trim();
   if (!text || !state.currentCommentsVideo) return;
+  const isOwnOriginal = state.currentCommentsVideo.authorId === state.user.uid && !state.currentCommentsVideo.repostOf;
+  if (isOwnOriginal) return toast('Своё нельзя комментить');
   input.value = '';
   try {
     const data = {
@@ -1338,9 +1439,11 @@ async function sendComment() {
       data.replyToUsername = state.replyTo.username;
     }
     await addDoc(collection(db, 'comments'), data);
+    const notifyAuthor = state.currentCommentsVideo.repostOf ? state.currentCommentsVideo.originalAuthorId : state.currentCommentsVideo.authorId;
     try { await updateDoc(doc(db, 'videos', state.currentCommentsVideo.videoId), { commentsCount: increment(1) }); } catch {}
-    createNotification(state.currentCommentsVideo.authorId, 'comment', {
-      videoId: state.currentCommentsVideo.videoId, commentText: text
+    createNotification(notifyAuthor, 'comment', {
+      videoId: state.currentCommentsVideo.repostOf || state.currentCommentsVideo.videoId,
+      commentText: text
     });
     cancelReply();
   } catch (err) { input.value = text; handleError(err, 'comment.send'); }
@@ -1354,9 +1457,7 @@ async function doSearch(term) {
     const t = term.toLowerCase().trim();
     const clean = t.replace('#', '');
     const filter = state.searchFilter;
-
     let users = [], videos = [], tags = [];
-
     if (filter === 'all' || filter === 'users') {
       const uSnap = await getDocs(query(collection(db, 'users'),
         where('username', '>=', clean), where('username', '<=', clean + '\uf8ff'), limit(15)));
@@ -1374,7 +1475,6 @@ async function doSearch(term) {
     if (filter === 'all' || filter === 'tags') {
       tags = state.trendingTags.filter(x => x.tag.includes(clean)).slice(0, 10);
     }
-
     let html = '';
     if (tags.length) {
       html += `<div class="search-section"><h3>Теги</h3><div style="display:flex;flex-wrap:wrap;gap:6px;">`;
@@ -1403,7 +1503,6 @@ async function doSearch(term) {
     }
     if (!html) html = `<p class="muted small" style="margin-top:16px;">Ничего не найдено</p>`;
     el.innerHTML = html;
-
     el.querySelectorAll('.user-result').forEach(x =>
       x.addEventListener('click', () => { state.viewingProfileUid = x.dataset.uid; switchTab('profile'); }));
     el.querySelectorAll('.video-thumb').forEach(x =>
@@ -1419,10 +1518,9 @@ async function doSearch(term) {
   }
 }
 
-// ═══ UPLOAD + DRAFTS ═══
+// ═══ UPLOAD ═══
 function onVideoPicked(e) {
-  const f = e.target.files?.[0];
-  if (!f) return;
+  const f = e.target.files?.[0]; if (!f) return;
   if (f.size > 100 * 1024 * 1024) return toast('Видео >100MB. Сожми');
   if (f.size > 30 * 1024 * 1024) toast('⚠️ Большой файл');
   state.uploadFile = f;
@@ -1484,7 +1582,6 @@ function renderDrafts() {
       renderDrafts();
     }));
 }
-
 async function extractThumbnail(file) {
   return new Promise(resolve => {
     try {
@@ -1504,7 +1601,6 @@ async function extractThumbnail(file) {
     } catch { resolve(null); }
   });
 }
-
 async function submitUpload() {
   if (!state.uploadFile) return toast('Выберите видео');
   const btn = $('#uploadSubmitBtn');
@@ -1676,7 +1772,7 @@ function loadProfileGrid(type) {
   unsub('viewProfileVideos');
   const uid = state.viewingProfileUid || state.user.uid;
   const grid = $('#profileGrid');
-  grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><div class="spinner"></div></div>`;
+  grid.innerHTML = Array(6).fill('<div class="skeleton-thumb"></div>').join('');
 
   let q;
   if (type === 'liked') q = query(collection(db, 'likes'), where('userId', '==', uid), limit(30));
@@ -1721,7 +1817,7 @@ function loadProfileGrid(type) {
   state.subs.set('viewProfileVideos', u);
 }
 
-// ═══ HISTORY / MISC ═══
+// ═══ HISTORY ═══
 function renderHistory() {
   const el = $('#historyList');
   if (!el) return;
